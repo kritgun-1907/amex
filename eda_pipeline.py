@@ -304,40 +304,115 @@ print(f"\n  Total nulls after imputation: {df_imp[FEATURES].isna().sum().sum():,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 5 — RANK-TRANSFORM (PERCENTILE NORMALIZATION)
+# PHASE 5 — RANK-TRANSFORM (ECONOMICALLY-DIRECTED PERCENTILE NORMALIZATION)
 # ══════════════════════════════════════════════════════════════════════════════
-section("PHASE 5 — RANK-TRANSFORM (PERCENTILE NORMALIZATION)")
+section("PHASE 5 — RANK-TRANSFORM (ECONOMICALLY-DIRECTED PERCENTILE NORMALIZATION)")
 
 print("""
   Rationale:
   - Metric is rank-based (top-20% overlap) → scale is irrelevant, rank is everything.
   - Rank-transform is outlier-resistant (f7 max ~147K can't distort the result).
   - Preserves relative order, not absolute magnitude.
-  - All features normalized to [0, 1] percentile scale before weighting.
+
+  The average-rank tie problem:
+  - method='average' assigns all tied zeros the MIDPOINT rank of the tie block.
+  - Example: ~72% of f21 rows are 0 after imputation → every zero gets rank ~0.36.
+  - In the P&L equation (Score -= W * f21_rank), a zero-cost customer suffers a
+    -0.36 penalty they don't deserve. A 1-point redeemer lands at ~0.37 — almost
+    identical. The active range is compressed; zero-cost customers are penalised
+    as moderate liabilities.
+
+  Fix — zero-floor rank for features where 0 = genuine inactivity (>20% zeros):
+  - All post-imputation 0.0 values → hard rank 0.0  (no economic activity)
+  - Non-zero values → ranked proportionally within (0, 1]
+  - Zero-cost customer now correctly contributes 0 penalty.
+  - f7 (Other Spend) is exempted: negative values are informative refunds that
+    must rank below zero-spend customers — standard rank preserved.
 """)
 
-df_ranked = df_imp.copy()
-for feat in FEATURES:
-    df_ranked[f"{feat}_rank"] = (
-        df_imp[feat].rank(method="average", na_option="keep") / len(df_imp)
-    )
+ZERO_FLOOR_THRESHOLD = 0.20  # apply zero-floor if >20% of values are exactly 0
 
-rank_cols = [f"{f}_rank" for f in FEATURES]
+
+def zero_floor_rank(series: pd.Series) -> pd.Series:
+    """
+    Zero-floor percentile rank.
+    Exact zeros → 0.0 (inactive floor).
+    Non-zeros → ranked in (0, 1] relative to the active-only population.
+    """
+    result   = pd.Series(0.0, index=series.index, dtype=float)
+    nonzero  = series != 0
+    n_active = int(nonzero.sum())
+    if n_active > 0:
+        result[nonzero] = (
+            series[nonzero].rank(method="average") / n_active
+        )
+    return result
+
+
+df_ranked  = df_imp.copy()
+rank_cols  = []
+rank_log   = []
+
+print(f"  {'Feature':<8}  {'Zero %':>7}  {'Method':<40}  {'Min rank':>9}  {'Max rank':>9}")
+print(f"  {SEP2}")
+
+for feat in FEATURES:
+    zero_pct = (df_imp[feat] == 0).mean()
+
+    if feat == "f7":
+        # f7 has real negative values (refunds) — standard rank preserves that signal
+        df_ranked[f"{feat}_rank"] = (
+            df_imp[feat].rank(method="average") / len(df_imp)
+        )
+        method = "standard  (negatives present)"
+
+    elif zero_pct > ZERO_FLOOR_THRESHOLD:
+        df_ranked[f"{feat}_rank"] = zero_floor_rank(df_imp[feat])
+        method = f"zero-floor (0-tie = {zero_pct*100:.1f}% of base)"
+
+    else:
+        df_ranked[f"{feat}_rank"] = (
+            df_imp[feat].rank(method="average") / len(df_imp)
+        )
+        method = f"standard  (only {zero_pct*100:.1f}% zeros)"
+
+    rmin = df_ranked[f"{feat}_rank"].min()
+    rmax = df_ranked[f"{feat}_rank"].max()
+    rank_cols.append(f"{feat}_rank")
+    rank_log.append((feat, zero_pct, method, rmin, rmax))
+    print(f"  {feat:<8}  {zero_pct*100:>6.1f}%  {method:<40}  {rmin:>9.4f}  {rmax:>9.4f}")
+
+# summary table
 rank_summary = df_ranked[rank_cols].describe().T[["min", "25%", "50%", "75%", "max"]]
 rank_summary.index = FEATURES
-print("  Rank-transformed feature summary (should all be ~0 to 1):\n")
+print(f"\n  Rank-transformed feature summary:\n")
 with pd.option_context("display.float_format", "{:.4f}".format):
     print(rank_summary.to_string())
 
-# distribution check post-rank (should be uniform)
+# verify the penalty trap is fixed for key cost features
+print(f"\n{SEP2}\n  Penalty-trap verification (zero-cost customers should have rank ~0.0):\n")
+for feat in ["f21", "f13", "f14", "f15", "f11", "f4"]:
+    zero_rank = df_ranked.loc[df_imp[feat] == 0, f"{feat}_rank"].mean()
+    print(f"  {feat}  mean rank of zero-value rows = {zero_rank:.4f}  "
+          f"{'✓ FIXED' if zero_rank < 0.01 else '⚠ check'}")
+
+# distribution plots — compare key revenue and cost features
 print(f"\n{SEP2}\n  Saving post-rank distribution plots …")
 fig, axes = plt.subplots(2, 4, figsize=(18, 8))
-for ax, feat in zip(axes.flat, ["f5","f1","f7","f11","f21","f4","f13","f14"]):
-    data = df_ranked[f"{feat}_rank"].dropna()
-    ax.hist(data, bins=40, color="#27ae60", edgecolor="none", alpha=0.8)
-    ax.set_title(f"{feat}_rank", fontsize=9)
-    ax.set_xlim(0, 1)
-plt.suptitle("Post Rank-Transform Distributions (expect near-uniform)", fontsize=10)
+plot_feats = ["f5", "f1", "f7", "f11", "f21", "f4", "f13", "f15"]
+for ax, feat in zip(axes.flat, plot_feats):
+    data  = df_ranked[f"{feat}_rank"].dropna()
+    role  = FEATURE_META[feat][1]
+    color = "#2980b9" if "REVENUE" in role else "#c0392b"
+    ax.hist(data, bins=50, color=color, edgecolor="none", alpha=0.8)
+    zero_mass = (data == 0.0).mean()
+    ax.set_title(f"{feat}_rank  (0-mass={zero_mass*100:.0f}%)", fontsize=8)
+    ax.set_xlim(-0.02, 1.05)
+plt.suptitle(
+    "Post Rank-Transform (blue=Revenue, red=Cost)\n"
+    "Spike at 0.0 = inactive/zero-cost floor — correctly penalises nothing",
+    fontsize=9,
+)
 plt.tight_layout()
 fig.savefig(f"{OUT_DIR}/p5_ranked_distributions.png", dpi=150)
 plt.close()
