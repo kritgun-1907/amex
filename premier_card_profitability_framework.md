@@ -16,36 +16,50 @@ $$\text{Net Profitability} = \text{Gross Revenue} - \text{Direct Variable Costs}
 
 ---
 
-## 2. The Final Scoring Equation (v2 — rebalanced)
+## 2. The Final Scoring Equation (v4 — coverage-adjusted, f3 override)
 
-> **v2 changes from v1:** f5 boosted to 0.50 (dominant interchange anchor), f1 to 0.55 (NIM engine), f6–f10 cut to 0.01–0.02 (tiny modifiers only). All cost weights scaled ~0.67× to balance total revenue vs total cost. Result: revenue total = cost total = 1.17. DSS improved from 0.41 → 0.49.
+> **v4 structural fixes over v3:**
 >
-> v1 issue: costs outweighed revenue 1.9×, selecting top 20% for "least bad" not "most profitable." f6–f10 were acting as a second spend engine (92.8% of top 20% were category-active vs 76.8% baseline).
+> **Fix 1 — f3 Hard Override:** f3 (collections) had raw weight −0.25 but only 2.6% ablation impact because 89% of customers have f3=0. A linear weight only engages 11% of the population and is nearly ineffective. Fix: knock-out pre-filter — any customer with f3 > 0 receives score = −999 and is excluded from top 20% entirely. 54,304 collections customers now permanently ineligible.
+>
+> **Fix 2 — Coverage-Adjusted Weights:** Zero-floor rank gives rank 0.0 to all zero-value customers. A feature with 72% zeros (f21) only sorts 28% of the population — its nominal weight of −0.18 produced an effective sorting impact of only −0.050. To achieve the *intended* effective impact, raw weights must be back-solved: `raw = desired_effective / (1 − zero_fraction)`. Key corrections: f21: −0.18 → −0.43 | f13: −0.12 → −0.27 | f14: −0.08 → −0.16 | f15: −0.08 → −0.15.
+>
+> **Fix 3 — Benefit Inversion Resolved:** v3 top 20% had higher cab (f15) and entertainment credit (f16) usage than bottom 80% — the spend reward (effective +0.234) was drowning out benefit penalties (effective −0.052 on f15). After coverage adjustment, f15 effective = −0.098 and the inversion is eliminated. f16 has a residual 12.9% ratio (57.2 vs 50.7 mean) but this is structurally unavoidable: f16 is hard-capped at $64.40 with 97.3% coverage and the economic delta is only $6.34/year versus $57/year interchange premium from the spend difference.
 
+**PRE-FILTER (applied before scoring):**
+```
+if f3 > 0 → INELIGIBLE (collections = near-certain loss; hard knock-out)
+```
+
+**SCORING EQUATION (applied to eligible customers only):**
 ```
 Profitability Score =
-    + 0.55 * rank(f1)      # Revolve Interest (NIM engine, ~20-30% APR)
-    + 0.50 * rank(f5)      # Base Interchange Spend  ← dominant anchor
-    + 0.02 * rank(f6)      # Airlines — tiny premium add-on
-    + 0.02 * rank(f7)      # Other Spend — tiny generic add-on
-    + 0.02 * rank(f10)     # Dining — tiny premium add-on
-    + 0.01 * rank(f8)      # Entertainment — minor add-on
-    + 0.01 * rank(f9)      # Lodging — minor add-on
-    + 0.02 * rank(f17)     # Total Lend Capacity
-    + 0.02 * rank(f18)     # Consumer Lend Capacity
-    - 0.40 * rank(f11)     # Expected Credit Loss (heaviest penalty)
-    - 0.20 * rank(f3)      # Collections / near-certain loss
-    - 0.14 * rank(f21)     # Realized Point Redemption Cost
-    - 0.11 * rank(f4)      # Deferred Reward Liability (breakage-adjusted)
-    - 0.10 * rank(f13)     # Direct Lounge Cost
-    - 0.07 * rank(f14)     # Airline Credit Drain
-    - 0.07 * rank(f15)     # Cab Benefit Drain
-    - 0.05 * rank(f16)     # Saturated Entertainment Credit Cost
-    - 0.03 * rank(f2)      # Retention Overhead / Churn Risk
+    + 0.43 * rank(f1)      # Revolve Interest (NIM engine, ~20-30% APR)
+    + 0.24 * rank(f5)      # Base Interchange Spend — primary anchor
+    + 0.08 * rank(f6)      # Airlines Spend — premium interchange 2.3-3.3%
+    + 0.04 * rank(f10)     # Dining Spend — premium interchange 1.85-2.75%
+    + 0.03 * rank(f7)      # Other Spend — generic 1.4-2.4%
+    + 0.03 * rank(f8)      # Entertainment Spend — mid-tier
+    + 0.03 * rank(f9)      # Lodging Spend — mid-tier
+    + 0.02 * rank(f17)     # Total Lend Capacity (Plan-It trust signal)
+    + 0.03 * rank(f18)     # Consumer Lend Capacity
+
+    - 0.42 * rank(f11)     # Expected Credit Loss (Basel III PD × EAD)
+    - 0.43 * rank(f21)     # Realized Pts Redemption Cost ~1c/pt  ← adj for 28% coverage
+    - 0.27 * rank(f13)     # Lounge Cost $24–32/visit             ← adj for 26% coverage
+    - 0.17 * rank(f4)      # Deferred Reward Liability (IFRS 15 breakage-adj)
+    - 0.16 * rank(f14)     # Airline Credit Drain ($0–$200 cap)   ← adj for 32% coverage
+    - 0.15 * rank(f15)     # Cab Benefit Drain $15/month          ← adj for 65% coverage
+    - 0.06 * rank(f16)     # Entertainment Credit (near-binary, hard-capped $64.40)
+    - 0.12 * rank(f2)      # Retention Overhead / Churn Calls     ← adj for 17% coverage
 ```
 
-**Weight balance:** Revenue total = +1.17 | Cost total = −1.17 | Net = 0.00
-**f5 share of transaction revenue** (f5 + f6–f10): 0.50 / 0.58 = **86%** — f5 does the heavy lifting; categories are modifiers only.
+**Effective weight totals** (raw × coverage = actual sorting impact):
+Revenue effective = +0.579 | Cost effective = −0.783 | Net effective = −0.204
+
+**Raw weight totals:** Revenue = +0.93 | Cost = −1.78 (asymmetry is intentional — high-zero cost features need inflated raw weights to deliver intended effective impact)
+
+**Load-bearing features** (ablation impact >5%): f1 (39.9%), f11 (38.5%), f5 (22.1%), f21 (21.8%), f13 (15.7%), f15 (15.6%), f4 (16.7%), f14 (11.2%), f6 (8.1%), f2 (7.5%)
 
 **Excluded (weight = 0.0):** f12 (logins), f22 (emails opened), f23 (emails clicked — 87.8% null), f19 (supplementary accounts), f20 (active charge cards). These are engagement/profile signals, not profit drivers, and folding them in either dilutes the financial signal or double-counts spend already captured in f5.
 
@@ -53,12 +67,12 @@ Profitability Score =
 
 ## 3. Revenue Drivers — Weight Justifications
 
-### f1 · Average Revolve Balance (12m) → **+0.55** *(v1: 0.45)*
+### f1 · Average Revolve Balance (12m) → **+0.43** *(v3: +0.45)*
 Primary Net Interest Margin engine. Outstanding balances carried month-to-month accrue high-margin interest. Premium revolving APRs run roughly **19.99%–29.99%**, versus interchange swipe fees that average only **~2%–3%**. A dollar of revolving balance therefore yields on the order of **10x** the gross revenue of a dollar of transactional volume — making f1 the strongest revenue-positive anchor, provided it is counterbalanced by risk.
 
 *Source: standard premium credit card financial disclosures / APR schedules.*
 
-### f5 · Total Spend (12m) → **+0.50** *(v1: 0.20)*
+### f5 · Total Spend (12m) → **+0.24** *(v3: +0.25)*
 Baseline gross interchange engine — the merchant discount revenue proxy before category enhancements. Amex premium processing costs merchants roughly **2.50% + $0.10** per transaction (Amex Premium tier), higher than Visa Signature (~2.44%) and World Elite Mastercard (~2.55%). Absolute transaction volume sets the organic profitability floor.
 
 *Source: Amex OptBlue / premium network fee schedules; retail comparison — Amex Premium 2.85% total fee on $500 = $14.45 vs. Visa Signature $12.40.*
@@ -90,7 +104,7 @@ Approved borrowing capacity / underwriting-trust signals (Plan-It). Capacity doe
 
 ## 4. Cost & Risk Drivers — Weight Justifications
 
-### f11 · Average Risk Score (12m) → **−0.40** (heaviest) *(v1: −0.60)*
+### f11 · Average Risk Score (12m) → **−0.42** (heaviest) *(v3: −0.50)*
 Expected Credit Loss anchor. Default is catastrophic — it wipes out all associated revenue:
 
 $$\text{Expected Loss} = \text{PD (Risk Score)} \times \text{EAD (Outstanding Balance)}$$
@@ -99,40 +113,50 @@ A single default obliterates the interchange profit generated by dozens of high-
 
 *Source: Basel III risk-weighted-assets framework; bank credit-loss provisioning standards.*
 
-### f3 · Collections-Related Cancellation Calls → **−0.20** *(v1: −0.30)*
-Active delinquency / near-certain-loss signal — the customer has crossed from *predicted* risk into a *realized* operational loss threat. Demands a substantial, non-linear penalty.
+### f3 · Collections-Related Cancellation Calls → **HARD OVERRIDE** *(v3: −0.25 weight)*
+Active delinquency / near-certain-loss signal — the customer has crossed from *predicted* risk into a *realized* operational loss threat.
+
+**Why override instead of weight:** f3 is binary in practice (89% of customers have f3=0). A linear weight of −0.25 only engages 11% of the population and produces only 2.6% ablation impact. Any customer with f3 > 0 cannot be profitable regardless of spend or revolve — they are in active collections. A hard knock-out pre-filter is economically correct and eliminates the "wasted weight" problem. 54,304 customers are permanently excluded.
 
 *Source: retail-bank debt collection & Net Charge-Off standard operating procedures.*
 
-### f21 · Rewards Points Redeemed (12m) → **−0.14** *(v1: −0.20)*
+### f21 · Rewards Points Redeemed (12m) → **−0.43** *(v3: −0.18)*
 Realized variable rewards expense — hard cash leaving the bank to pay partners. Redeemed points are valued at a fixed internal liability of **~1.0 cent per point** (flight redemptions via Amex Travel hit 1.0¢; Pay-with-Points ~0.7¢; the 1.0¢ ceiling is the conservative cost assumption). High redemption = maximum program-value extraction = expensive customer.
+
+**Why −0.43 raw weight (was −0.18):** f21 has 72.2% zeros — only 27.8% of customers have any redemptions. The zero-floor rank assigns all 72% a score of 0.0, so f21 only actively sorts 28% of the population. With a raw weight of −0.18, the effective sorting impact is only −0.18 × 0.278 = −0.050. To achieve the intended effective impact of −0.12 (major cost driver), the raw weight must be back-solved: −0.12 / 0.278 = **−0.43**.
 
 *Source: Amex Membership Rewards program terms; redemption examples — 50,000 points = $500 flight (1.0¢/pt).*
 
-### f4 · Rewards Points Balance → **−0.11** *(v1: −0.16)*
+### f4 · Rewards Points Balance → **−0.17** *(v3: −0.14)*
 Deferred revenue liability. Under IFRS 15 / GAAP, unredeemed points sit on the balance sheet as a liability — but discounted by an estimated **15%–20% breakage rate** (points that expire/forfeit). Weighted at **~80% of f21** (0.16 / 0.20 = 0.80) to mirror that breakage adjustment.
 **Not given a positive weight** as a spend proxy — spend is already fully captured in f5–f10, and doing so would double-count revenue.
 
 *Source: IFRS 15 / GAAP deferred reward liability standards. Note: MR points don't expire while the account is enrolled and in good standing, so breakage is driven by forfeiture on delinquency/cancellation rather than time expiry.*
 
-### f13 · Lounge Access Count (0–3) → **−0.10** *(v1: −0.15)*
+### f13 · Lounge Access Count (0–3) → **−0.27** *(v3: −0.12)*
 Fixed per-usage variable cost. This is a **visit count, not dollars** — each lounge swipe costs the issuer a wholesale operator fee of roughly **$24–$32** (Priority Pass charges USD 32 per additional guest visit). Frequent exploitation generates substantial direct cost.
+
+**Why −0.27 raw weight (was −0.12):** f13 has 73.7% zeros (count feature 0–3). Only 26.3% of customers visit the lounge at all. Effective impact of −0.12 raw = −0.032 — nearly invisible. Back-solved for effective target −0.07: −0.07 / 0.263 = **−0.27**. After adjustment, f13 has 15.7% ablation impact (was 9.4%).
 
 *Source: Priority Pass / Centurion issuer partnership terms — USD 32 guest visit fee.*
 
-### f14 · Airline Credits Used ($0–$200) → **−0.07** *(v1: −0.10)*
+### f14 · Airline Credits Used ($0–$200) → **−0.16** *(v3: −0.08)*
 Ancillary travel-credit direct cost — statement reimbursements up to a fixed annual cap (~$150–$250, hard-capped at $200 in data). Direct bottom-line expenditure, tempered by portfolio-wide non-utilization.
 
-### f15 · Cab Benefits Used (months, 0–11) → **−0.07** *(v1: −0.10)*
-Partner credit expense. This is a **months-utilized count, not dollars** — structured as **$15/month + a $20 December bonus** (Amex Platinum Uber Cash: $15 monthly + $20 in December = up to $200/year). Because credits expire monthly at 11:59 PM HST, they trigger high organic breakage, and Uber wholesale arrangements mean a dollar utilized costs the issuer less than a dollar of cash rewards — hence a lighter weight than lounge.
+### f15 · Cab Benefits Used (months, 0–11) → **−0.15** *(v3: −0.08)*
+Partner credit expense. This is a **months-utilized count, not dollars** — structured as **$15/month + a $20 December bonus** (Amex Platinum Uber Cash: $15 monthly + $20 in December = up to $200/year). Because credits expire monthly at 11:59 PM HST, they trigger high organic breakage, and Uber wholesale arrangements mean a dollar utilized costs the issuer less than a dollar of cash rewards.
+
+**Why −0.15 raw weight (was −0.08):** f15 has 34.5% zeros. Effective impact of −0.08 raw = −0.052 — so weak that the spend reward (+0.24 eff) was dragging high-spend cab users into the top 20% (benefit inversion confirmed: top 20% had mean 3.98 cab months vs 3.86 bottom 80%). Back-solved for effective target −0.10: −0.10 / 0.655 = **−0.15**. Post-fix: top 20% mean = 3.11 vs bottom 80% mean = 4.09 — inversion eliminated.
 
 *Source: Amex Platinum Uber Cash / Uber One benefit disclosures.*
 
 ### f16 · Entertainment Credit Used ($0–$64.40) → **−0.05** *(v1: −0.08)*
 Saturated lifestyle statement credit, **hard-capped at 64.40** (75th percentile = maximum). It behaves **near-binary in the top quartile** — everyone above the 75th percentile carries the identical cost — so it cannot differentiate the top of the portfolio and gets a light weight. Sorting the top relies on f5 (spend) and f1 (revolve).
 
-### f2 · Cancellation Calls (12m) → **−0.03** *(v1: −0.05)*
-Churn-intention and retention-cost indicator. Retention specialists offer statement credits, fee waivers, or point bundles to save accounts, so these calls proxy fee leakage plus servicing overhead. Light negative weight.
+### f2 · Cancellation Calls (12m) → **−0.12** *(v3: −0.04)*
+Churn-intention and retention-cost indicator. Retention specialists offer statement credits, fee waivers, or point bundles to save accounts, so these calls proxy fee leakage plus servicing overhead.
+
+**Why −0.12 raw weight (was −0.04):** f2 has 82.6% zeros — only 17.4% of customers place any cancellation calls. Effective impact of −0.04 raw = −0.007 (nearly invisible). Back-solved for effective target −0.02: −0.02 / 0.174 = **−0.12**. Now carries 7.5% ablation impact (was 2.6%).
 
 *Source: credit card retention operations disclosures.*
 
