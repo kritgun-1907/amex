@@ -131,7 +131,7 @@ The nulls in this dataset are **NOT random**. They arrive in locked groups repre
 
 ## 5. Normalization Strategy
 
-**Choice: Rank-Transform (Percentile Scaling) — 0.0 to 1.0**
+**Choice: Zero-Floor Rank-Transform — 0.0 to 1.0**
 
 **Why not min-max:** Too sensitive to extreme outliers (f7 hits ~147,000; min-max squashes the rest of the distribution into near-zero).
 
@@ -139,32 +139,46 @@ The nulls in this dataset are **NOT random**. They arrive in locked groups repre
 
 **Why rank-transform wins:** The competition metric is **% overlap of your top 20% vs Amex's top 20%** — a purely rank-based score. Rank-transforming features aligns the input scale directly with the evaluation mechanic. Absolute dollar magnitude is irrelevant; only relative ordering matters.
 
-**Important distinction:** Rank-transform makes features equal in **scale**, not in **weight**. After transformation, the only levers are the coefficients you assign to each feature.
+**Zero-floor rank (critical detail):** Customers with a zero value receive rank exactly **0.0** (hard floor), NOT the average rank of all tied zeros. If 72% of customers have f21=0, the average-rank method assigns them all rank ~0.36 — inventing a phantom positive signal for customers with zero redemption activity, which is economically wrong. Zero-floor preserves the meaning: "zero activity → zero rank → zero contribution."
+
+The EDA pipeline (`eda_pipeline.py`) implements this with the `zero_floor_rank()` function. The harness includes a sanity check that aborts if the stale average-rank file is accidentally loaded.
+
+**Important distinction:** Rank-transform makes features equal in **scale**, not in **weight**. After transformation, the only levers are the coefficients assigned to each feature. And because high-zero features only sort a fraction of the population, the effective sorting power ≠ stated weight — see Coverage-Adjusted Weights below.
 
 ---
 
-## 6. Profitability Equation Skeleton (Post-Normalization)
+## 6. Profitability Equation (v5 — effective weights, f3 override, f16 excluded)
+
+**All coefficients are EFFECTIVE weights** (desired sorting power, grounded in card economics).
+The harness back-solves: `raw_weight = effective_weight / (1 - zero_fraction)`.
+
+**PRE-FILTER:** `if f3 > 0 → ineligible` (smooth bottom-rank, not −999 sentinel)
 
 ```
-Profitability Score =
-    + w_spend        × rank(f5)                          # gross spend anchor
-    + w_airline      × rank(f6)                          # premium interchange
-    + w_dining       × rank(f10)                         # premium interchange
-    + w_other_spend  × rank(f7)                          # lower interchange
-    + w_ent_spend    × rank(f8)
-    + w_lodge        × rank(f9)
-    + w_revolve      × rank(f1)                          # interest revenue
-    + w_lend         × rank(f17)                         # lend capacity
-    - w_pts_redeem   × rank(f21)                         # realized cost (heavy)
-    - w_pts_bal      × rank(f4)                          # liability (discounted)
-    - w_risk         × rank(f11)                         # expected loss
-    - w_collections  × rank(f3)                          # hard credit loss signal
-    - w_lounge       × rank(f13)                         # per-visit cost
-    - w_airline_cred × rank(f14)                         # benefit cost
-    - w_cab          × rank(f15)                         # benefit cost
-    - w_ent_cred     × rank(f16)                         # benefit cost (binary above 75th)
-    - w_cancel       × rank(f2)                          # servicing cost + churn
+Profitability Score (effective weights):
+    + 0.20 × rank(f1)     # revolve interest — NIM engine ~20-30% APR
+    + 0.22 × rank(f5)     # total spend — primary interchange anchor
+    + 0.05 × rank(f6)     # airlines — premium interchange 2.3-3.3%
+    + 0.03 × rank(f10)    # dining — premium interchange 1.85-2.75%
+    + 0.03 × rank(f7)     # other spend — generic 1.4-2.4%
+    + 0.015 × rank(f8)    # entertainment spend — mid-tier
+    + 0.015 × rank(f9)    # lodging spend — mid-tier
+    + 0.01 × rank(f17)    # lend capacity (Plan-It trust signal)
+    + 0.01 × rank(f18)    # consumer lend capacity
+
+    - 0.26 × rank(f11)    # expected credit loss (heaviest penalty)
+    - 0.10 × rank(f21)    # realized pts cost ~1c/pt (below risk; not over-penalised)
+    - 0.09 × rank(f15)    # cab months $15/mo partner cost
+    - 0.07 × rank(f4)     # deferred liability IFRS 15 breakage-adj
+    - 0.07 × rank(f13)    # lounge per-visit $24-32
+    - 0.05 × rank(f14)    # airline credit drain
+    - 0.02 × rank(f2)     # retention overhead / churn signal
+
+    f16 EXCLUDED — hard-capped, near-binary, no top-quartile rank signal
 ```
+
+**Why effective weights, not raw weights:**
+A feature with 72% zeros (f21) only sorts 28% of the population. Its raw weight of −0.360 has an effective sorting power of −0.10. Stating −0.10 as the designed-for impact is more defensible than stating −0.360. The harness back-solves raw weights transparently — displayed in the coverage table at every run.
 
 **Design principle:** Benefit-usage terms and risk terms must **subtract**. Any equation that rewards high benefit utilization has inverted economics.
 
@@ -200,11 +214,15 @@ A low-spend, high-risk customer who maxes every credit and redeems all points is
 1. Do not train an ML model — there is no target column.
 2. Do not sum raw un-normalized features — largest magnitude column silently dominates.
 3. Do not mean/median-impute the structured-null groups — manufactures fake P&L.
-4. Do not build f5 vs f6–f10 share features — they don't reconcile.
+4. Do not build f5 vs f6–f10 share features — they don't reconcile (r=0.09).
 5. Do not assume f17 ≥ f18 or build a difference feature.
 6. Do not reward benefit utilization — that rewards loss-makers.
 7. Do not overfit the public leaderboard (70%) — private (30%) decides the outcome.
 8. Do not give f4 a positive weight as a spend proxy — double-counts revenue already in f5–f10.
+9. **Do not use average-rank for zero-value customers** — use zero-floor rank. Average-rank assigns zeros a mid-pile rank (~0.36), manufacturing phantom signal for inactivity.
+10. **Do not set raw weights directly without checking coverage** — a feature with 72% zeros needs ~3.6× the raw weight to achieve the same effective sorting power as a feature with 6% zeros. State EFFECTIVE weights and back-solve raw.
+11. **Do not use −999 sentinels in submission output** — it can look like gaming and may break bounded-score templates. Use smooth bottom-ranking within the ordinary score range.
+12. **Do not apply a tolerance gate to pass a known inversion** — if a feature's inversion cannot be fixed by any weight (f16, hard-capped near-binary), the correct call is to exclude it, not to widen the gate until it passes.
 
 ---
 
